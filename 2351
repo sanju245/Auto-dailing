@@ -1,0 +1,14 @@
+# Twilio (backend only, never sent to the browser)
+TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_API_KEY_SID=SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_API_KEY_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_AUTH_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_TWIML_APP_SID=APxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_CALLER_ID=+15551234567
+
+# Public HTTPS base URL of this server (used to validate Twilio webhooks)
+PUBLIC_URL=https://your-domain.example.com
+
+# Agents must enter this on the Agent page to get a token
+AGENT_PASSCODE=change-me
+PORT=3000

@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AllSafe Dialer · Agent</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root { --navy:#0b1f3a; --navy2:#12305a; --orange:#ff8a1f; --ink:#e8eef7; --dim:#8fa3bf; --ok:#3ddc84; --bad:#ff5c5c; }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; background:var(--navy); color:var(--ink);
+         font-family:'IBM Plex Mono',ui-monospace,monospace; display:grid; place-items:center; padding:16px; }
+  .phone { width:100%; max-width:380px; background:var(--navy2); border:1px solid #21467d; border-radius:12px; padding:20px; }
+  h1 { font-size:16px; margin:0 0 16px; }
+  .status { display:flex; align-items:center; gap:8px; font-size:13px; color:var(--dim); margin-bottom:16px; }
+  .dot { width:10px; height:10px; border-radius:50%; background:#5b6b82; }
+  .dot.ready { background:var(--ok); } .dot.busy { background:var(--orange); } .dot.err { background:var(--bad); }
+  label { display:block; font-size:12px; color:var(--dim); margin:12px 0 4px; }
+  input { width:100%; padding:10px; border-radius:6px; border:1px solid #2b5590; background:var(--navy);
+          color:var(--ink); font:inherit; }
+  input:focus, button:focus-visible { outline:2px solid var(--orange); outline-offset:1px; }
+  .timer { font-size:36px; text-align:center; margin:20px 0; font-variant-numeric:tabular-nums; }
+  .row { display:flex; gap:8px; margin-top:8px; }
+  button { flex:1; padding:12px; border:0; border-radius:6px; font:inherit; font-weight:600; cursor:pointer;
+           background:var(--orange); color:#1a1000; }
+  button.ghost { background:transparent; color:var(--ink); border:1px solid #2b5590; }
+  button.hang { background:var(--bad); color:#fff; }
+  button:disabled { opacity:.35; cursor:not-allowed; }
+  .msg { min-height:18px; font-size:12px; color:var(--bad); margin-top:12px; }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main class="phone">
+  <h1>AllSafe Dialer · Agent phone</h1>
+
+  <div class="status" role="status" aria-live="polite">
+    <span class="dot" id="dot"></span><span id="statusText">Disconnected</span>
+  </div>
+
+  <section id="connectPane">
+    <label for="passcode">Agent passcode</label>
+    <input id="passcode" type="password" autocomplete="current-password">
+    <label for="identity">Agent name</label>
+    <input id="identity" type="text" value="agent1" maxlength="40">
+    <div class="row"><button id="connectBtn">Connect phone</button></div>
+  </section>
+
+  <section id="callPane" hidden>
+    <label for="number">Number to call (E.164, e.g. +15551234567)</label>
+    <input id="number" type="tel" inputmode="tel" placeholder="+1...">
+    <div class="timer" id="timer">00:00</div>
+    <div class="row">
+      <button id="callBtn">Call</button>
+      <button id="hangBtn" class="hang" disabled>Hang up</button>
+    </div>
+    <div class="row">
+      <button id="muteBtn" class="ghost" disabled>Mute</button>
+      <button id="disconnectBtn" class="ghost">Disconnect phone</button>
+    </div>
+  </section>
+
+  <div class="msg" id="msg"></div>
+</main>
+
+<script src="/vendor/twilio.min.js"></script>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  let device = null, call = null, tick = null, startedAt = 0, stream = null;
+
+  const setStatus = (text, cls = '') => { $('statusText').textContent = text; $('dot').className = 'dot ' + cls; };
+  const setMsg = t => { $('msg').textContent = t || ''; };
+  const fmt = s => String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+
+  function startTimer() {
+    startedAt = Date.now();
+    tick = setInterval(() => { $('timer').textContent = fmt(Math.floor((Date.now() - startedAt) / 1000)); }, 500);
+  }
+  function stopTimer() { clearInterval(tick); tick = null; }
+
+  function resetCallUi() {
+    call = null; stopTimer();
+    $('callBtn').disabled = !device; $('hangBtn').disabled = true;
+    $('muteBtn').disabled = true; $('muteBtn').textContent = 'Mute';
+    if (device) setStatus('Ready', 'ready');
+  }
+
+  async function fetchToken() {
+    const r = await fetch('/api/voice/token', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ passcode: $('passcode').value, identity: $('identity').value }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || 'Could not get token');
+    return data.token;
+  }
+
+  async function connectPhone() {
+    setMsg(''); $('connectBtn').disabled = true; setStatus('Requesting microphone…', 'busy');
+    try {
+      // 1) Ask for mic permission (then release; the SDK opens its own stream)
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach(t => t.stop());
+
+      // 2) Token from backend
+      setStatus('Getting token…', 'busy');
+      const token = await fetchToken();
+
+      // 3) Init Voice SDK
+      device = new Twilio.Device(token, { codecPreferences: ['opus', 'pcmu'], closeProtection: true });
+      device.on('registered', () => {});
+      device.on('error', e => { setMsg(e.message || 'Device error'); setStatus('Error', 'err'); });
+      device.on('tokenWillExpire', async () => {
+        try { device.updateToken(await fetchToken()); } catch { setMsg('Session expiring. Reconnect the phone.'); }
+      });
+      device.on('tokenExpired', () => { setMsg('Session expired. Reconnect the phone.'); disconnectPhone(); });
+
+      await device.register();
+
+      // 4) Use the selected headset for output/input
+      try {
+        const inputs = device.audio.availableInputDevices, outputs = device.audio.availableOutputDevices;
+        if (inputs.size) await device.audio.setInputDevice([...inputs.keys()].find(k => k !== 'default') || 'default');
+        if (outputs.size && device.audio.isOutputSelectionSupported)
+          await device.audio.speakerDevices.set([...outputs.keys()][0]);
+      } catch { /* fall back to system default */ }
+
+      $('connectPane').hidden = true; $('callPane').hidden = false;
+      resetCallUi(); setStatus('Ready', 'ready');
+    } catch (e) {
+      const denied = e && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
+      setMsg(denied ? 'Microphone blocked. Allow it in your browser settings and try again.' : (e.message || 'Connection failed'));
+      setStatus('Disconnected', 'err');
+      if (device) { device.destroy(); device = null; }
+    } finally { $('connectBtn').disabled = false; }
+  }
+
+  function disconnectPhone() {
+    if (call) call.disconnect();
+    if (device) { device.destroy(); device = null; }
+    resetCallUi(); $('timer').textContent = '00:00';
+    $('callPane').hidden = true; $('connectPane').hidden = false;
+    setStatus('Disconnected');
+  }
+
+  async function placeCall() {
+    const to = $('number').value.replace(/[\s()-]/g, '');
+    if (!/^\+[1-9]\d{7,14}$/.test(to)) return setMsg('Enter the number in E.164 format, like +15551234567.');
+    setMsg(''); $('callBtn').disabled = true; setStatus('Calling…', 'busy'); $('timer').textContent = '00:00';
+    try {
+      call = await device.connect({ params: { To: to } });
+      $('hangBtn').disabled = false;
+      call.on('ringing', () => setStatus('Ringing…', 'busy'));
+      call.on('accept', () => { setStatus('In call', 'busy'); $('muteBtn').disabled = false; startTimer(); });
+      call.on('mute', m => { $('muteBtn').textContent = m ? 'Unmute' : 'Mute'; setStatus(m ? 'In call (muted)' : 'In call', 'busy'); });
+      call.on('disconnect', resetCallUi);
+      call.on('cancel', resetCallUi);
+      call.on('error', e => { setMsg(e.message || 'Call error'); resetCallUi(); });
+    } catch (e) { setMsg(e.message || 'Could not place call'); resetCallUi(); }
+  }
+
+  $('connectBtn').onclick = connectPhone;
+  $('disconnectBtn').onclick = disconnectPhone;
+  $('callBtn').onclick = placeCall;
+  $('hangBtn').onclick = () => call && call.disconnect();
+  $('muteBtn').onclick = () => call && call.mute(!call.isMuted());
+})();
+</script>
+</body>
+</html>
